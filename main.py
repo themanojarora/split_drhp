@@ -103,7 +103,7 @@ def extract_table_of_contents(pdf_path: str):
         try:
             page = doc.load_page(page_num)
             text = page.get_text("text")
-            if "Contents" in text or "TABLE OF CONTENTS" in text:
+            if "contents" in text.lower() or "table of contents" in text.lower():
                 toc_start_page = page_num
                 break
         except:
