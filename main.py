@@ -92,137 +92,160 @@ def fetch_pdf_from_webpage(url: str) -> io.BytesIO:
         raise ValueError(f"Failed to download PDF from {pdf_url}")
     return io.BytesIO(pdf_resp.content)
 
-def extract_table_of_contents(pdf_path: str):
+def extract_table_of_contents(pdf_path):
     try:
         doc = fitz.open(pdf_path)
     except Exception as e:
-        st.error(f"Error opening PDF: {e}")
+        print(f"Error opening PDF {pdf_path}: {e}")
         return None
+    
     toc_start_page = None
-    for page_num in range(min(6, doc.page_count)):
+    for page_num in range(min(6, doc.page_count)):  # Check the first 5-6 pages
         try:
             page = doc.load_page(page_num)
             text = page.get_text("text")
-            if "contents" in text.lower() or "table of contents" in text.lower():
+            print(text[:10])
+            if "contents" in text.lower()[:100] or "table of contents" in text.lower()[:100]:
                 toc_start_page = page_num
                 break
-        except:
+        except Exception as e:
+            print(f"Error loading page {page_num} in {pdf_path}: {e}")
             continue
+
     if toc_start_page is None:
+        print(f"Table of Contents not found in the first 5-6 pages of {pdf_path}.")
         doc.close()
         return None
+
     toc_data = []
     page_num = toc_start_page
-    while page_num < doc.page_count:
+
+    while True:
         try:
             page = doc.load_page(page_num)
             links = [l for l in page.get_links() if l["kind"] in (fitz.LINK_GOTO, fitz.LINK_NAMED)]
-        except:
+        except Exception as e:
+            print(f"Error loading page {page_num} in {pdf_path}: {e}")
             break
+
         for link in links:
             try:
                 rect = fitz.Rect(link['from'])
                 link_text = page.get_text("text", clip=rect).strip()
-                target_page = link.get("page", -1) + 1
-                if link_text and target_page > 0:
+                target_page = link.get("page") + 1 if link.get("page") is not None else None
+                if link_text and target_page:
                     toc_data.append({
                         "Link Text": link_text,
                         "Target Page": target_page
                     })
-            except:
+            except Exception as e:
+                print(f"Error extracting link on page {page_num} in {pdf_path}: {e}")
                 continue
+
         page_num += 1
         if page_num >= doc.page_count:
             break
+
         try:
-            nxt_txt = doc.load_page(page_num).get_text("text")
-        except:
+            next_page_text = doc.load_page(page_num).get_text("text")
+        except Exception as e:
+            print(f"Error loading next page {page_num} in {pdf_path}: {e}")
             break
-        if not any(kw in nxt_txt for kw in ["SECTION", "....", "INTRODUCTION"]):
+
+        if not any(keyword in next_page_text for keyword in ["SECTION", "....", "INTRODUCTION"]):
             break
+
     if not toc_data:
+        print(f"No TOC data extracted from {pdf_path}.")
         doc.close()
         return None
-    df = pd.DataFrame(toc_data)
-    def clean_text(txt):
-        return re.sub(r'\.{2,}.*', '', txt).strip()
-    df["Link Text"] = df["Link Text"].apply(clean_text)
-    df["Type"] = df["Link Text"].apply(lambda x: "Section" if "SECTION" in x.upper() else "Subject")
-    def remove_section_prefix(txt):
-        return re.sub(r'^SECTION\s*[IVXLCD]+\s*:?', '', txt, flags=re.IGNORECASE).strip()
-    df["Cleaned Text"] = df["Link Text"].apply(remove_section_prefix)
+
+    df_links = pd.DataFrame(toc_data)
+
+    def clean_text(text):
+        text = re.sub(r'\.{2,}.*', '', text)
+        text = text.strip()
+        return text
+
+    df_links['Link Text'] = df_links['Link Text'].apply(clean_text)
+    df_links['Type'] = df_links['Link Text'].apply(lambda x: 'Section' if 'SECTION' in x.upper() else 'Subject')
+
+    def remove_section_prefix(text):
+        return re.sub(r'^SECTION\s*[IVXLC]+\s*:\s*', '', text, flags=re.IGNORECASE).strip()
+
+    df_links['Cleaned Text'] = df_links['Link Text'].apply(remove_section_prefix)
+
     entries = []
-    for _, row in df.iterrows():
+    for idx, row in df_links.iterrows():
         entries.append({
-            "Type": row["Type"],
-            "Text": row["Link Text"],
-            "CleanedText": row["Cleaned Text"],
-            "StartingPage": row["Target Page"]
+            'Type': row['Type'],
+            'Text': row['Link Text'],
+            'CleanedText': row['Cleaned Text'],
+            'StartingPage': row['Target Page']
         })
+
     toc_entries = []
     current_section = None
     current_section_start = None
+    current_section_end = None
+
     for idx, entry in enumerate(entries):
-        if entry["Type"] == "Section":
+        if entry['Type'] == 'Section':
             if current_section is not None:
-                same_sec = [i for i, e in enumerate(toc_entries) if e["subject_section"] == current_section]
-                if same_sec:
-                    last_i = same_sec[-1]
-                    if toc_entries[last_i]["ending_page_number"] is None:
-                        toc_entries[last_i]["ending_page_number"] = entry["StartingPage"] - 1
-                    for i2 in same_sec:
-                        if toc_entries[i2]["ending_page_number"] is None:
-                            toc_entries[i2]["ending_page_number"] = entry["StartingPage"] - 1
-                        if toc_entries[i2]["section_range"] is None:
-                            toc_entries[i2]["section_range"] = f"{current_section_start}-{entry['StartingPage'] - 1}"
-            current_section = entry["Text"]
-            current_section_start = entry["StartingPage"]
+                current_section_end = entry['StartingPage'] - 1
+                for e in toc_entries:
+                    if e['subject_section'] == current_section and e['ending_page_number'] is None:
+                        e['ending_page_number'] = current_section_end
+                for e in toc_entries:
+                    if e['subject_section'] == current_section and e['section_range'] is None:
+                        e['section_range'] = f"{current_section_start}-{current_section_end}"
+
+            current_section = entry['Text']
+            current_section_start = entry['StartingPage']
+            current_section_end = None
             toc_entries.append({
-                "Type": entry["Type"],
-                "subject": entry["Text"],
-                "cleaned_subject": entry["CleanedText"],
-                "starting_page_number": entry["StartingPage"],
-                "ending_page_number": None,
-                "subject_section": current_section,
-                "section_range": None
+                'Type': entry['Type'],
+                'subject': entry['Text'],
+                'cleaned_subject': entry['CleanedText'],
+                'starting_page_number': entry['StartingPage'],
+                'ending_page_number': None,
+                'subject_section': current_section,
+                'section_range': None
             })
         else:
-            if toc_entries and toc_entries[-1]["ending_page_number"] is None:
-                prev_start = toc_entries[-1]["starting_page_number"]
-                toc_entries[-1]["ending_page_number"] = max(prev_start, entry["StartingPage"] - 1)
+            if toc_entries and toc_entries[-1]['ending_page_number'] is None:
+                previous_start = toc_entries[-1]['starting_page_number']
+                current_start = entry['StartingPage']
+                toc_entries[-1]['ending_page_number'] = max(previous_start, current_start - 1)
             toc_entries.append({
-                "Type": entry["Type"],
-                "subject": entry["Text"],
-                "cleaned_subject": entry["CleanedText"],
-                "starting_page_number": entry["StartingPage"],
-                "ending_page_number": None,
-                "subject_section": current_section,
-                "section_range": None
+                'Type': entry['Type'],
+                'subject': entry['Text'],
+                'cleaned_subject': entry['CleanedText'],
+                'starting_page_number': entry['StartingPage'],
+                'ending_page_number': None,
+                'subject_section': current_section,
+                'section_range': None
             })
-    if toc_entries:
+
+    if current_section is not None:
         last_entry = toc_entries[-1]
-        try:
-            doc_page_count = doc.page_count
-        except:
-            doc_page_count = 9999
-        if last_entry["ending_page_number"] is None:
-            last_entry["ending_page_number"] = doc_page_count
-        last_sec = last_entry["subject_section"]
+        if last_entry['ending_page_number'] is None:
+            last_entry['ending_page_number'] = doc.page_count
+        current_section_end = last_entry['ending_page_number']
+
         for e in toc_entries:
-            if e["subject_section"] == last_sec:
-                if e["ending_page_number"] is None:
-                    e["ending_page_number"] = doc_page_count
-                if e["section_range"] is None:
-                    e["section_range"] = f"{current_section_start}-{doc_page_count}"
-    doc.close()
+            if e['subject_section'] == current_section and e['ending_page_number'] is None:
+                e['ending_page_number'] = current_section_end
+
+        for e in toc_entries:
+            if e['subject_section'] == current_section and e['section_range'] is None:
+                e['section_range'] = f"{current_section_start}-{current_section_end}"
+
     toc_df = pd.DataFrame(toc_entries)
-    toc_df["subject_range"] = toc_df["starting_page_number"].astype(str) + " - " + toc_df["ending_page_number"].astype(str)
-    toc_df = toc_df[
-        [
-            "Type", "subject", "cleaned_subject", "subject_range",
-            "subject_section", "section_range", "starting_page_number", "ending_page_number",
-        ]
-    ]
+    toc_df['subject_range'] = toc_df['starting_page_number'].astype(str) + " - " + toc_df['ending_page_number'].astype(str)
+    toc_df = toc_df[["Type", "subject", "cleaned_subject", "subject_range", "subject_section", "section_range", "starting_page_number", "ending_page_number"]]
+
+    doc.close()
     return toc_df
 
 def extract_pdf_pages(pdf_path: str, start_page: int, end_page: int, output_buffer: io.BytesIO):
